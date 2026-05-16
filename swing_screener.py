@@ -344,26 +344,29 @@ MEGA_CAP_UNIVERSE = [
 
 @st.cache_data(ttl=300, show_spinner=False)
 def fetch_ticker_data(ticker: str):
+    """Returns (hist DataFrame, market_cap_billions float) — both pickle-safe."""
     try:
         tk = yf.Ticker(ticker)
         hist = tk.history(period="1y", interval="1d", timeout=10)
         if hist.empty or len(hist) < 60:
-            return None, None
-        info = tk.fast_info
-        return hist, info
+            return None, 0.0
+        # Extract market_cap immediately so we only return pickle-safe types
+        market_cap_b = 0.0
+        try:
+            fi = tk.fast_info
+            mc = getattr(fi, "market_cap", None)
+            if mc and mc > 0:
+                market_cap_b = mc / 1e9
+        except Exception:
+            pass
+        return hist, market_cap_b
     except Exception:
-        return None, None
+        return None, 0.0
 
 
-def get_market_cap(info) -> float:
-    """Return market cap in USD billions."""
-    try:
-        mc = getattr(info, "market_cap", None)
-        if mc and mc > 0:
-            return mc / 1e9
-    except Exception:
-        pass
-    return 0.0
+def get_market_cap(market_cap_b: float) -> float:
+    """Pass-through — market_cap already extracted in fetch_ticker_data."""
+    return market_cap_b
 
 
 # ── Signal logic ─────────────────────────────────────────────────────────────
@@ -451,7 +454,7 @@ def signal_higher_low(hist: pd.DataFrame) -> tuple[bool, str]:
         return False, "計算錯誤"
 
 
-def signal_news(ticker: str, info) -> tuple[bool, str]:
+def signal_news(ticker: str) -> tuple[bool, str]:
     """
     News signal: check yfinance news count as a proxy.
     """
@@ -492,11 +495,9 @@ def run_scan(
             unsafe_allow_html=True,
         )
 
-        hist, info = fetch_ticker_data(ticker)
+        hist, mc_b = fetch_ticker_data(ticker)
         if hist is None:
             continue
-
-        mc_b = get_market_cap(info)
         if mc_b < min_market_cap_b:
             continue
 
@@ -523,7 +524,7 @@ def run_scan(
             if ok: signal_count += 1
 
         if use_news:
-            ok, detail = signal_news(ticker, info)
+            ok, detail = signal_news(ticker)
             signals["news"] = (ok, detail)
             if ok: signal_count += 1
 
@@ -533,12 +534,6 @@ def run_scan(
 
         if signal_count < min_signals:
             continue
-
-        # Company name
-        try:
-            cname = getattr(info, "currency", "") and tk_name(ticker)
-        except Exception:
-            cname = ticker
 
         # Volume ratio
         vol_ratio = hist["Volume"].iloc[-5:].mean() / hist["Volume"].iloc[-20:].mean()
